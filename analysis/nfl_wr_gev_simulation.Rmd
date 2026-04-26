@@ -1,0 +1,634 @@
+---
+title: "Simulation-Based Verification for NFL WR 40-yard Dash Extremes"
+author: "Francis Yap"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+echo    = TRUE,
+message = TRUE,
+warning = TRUE
+)
+```
+Overview
+
+This document provides a reproducible simulation-based verification of generalized extreme-value (GEV) modeling for NFL wide receiver (WR) 40-yard dash performance.
+
+The analysis proceeds as follows:
+
+1. NFL Combine WR 40-yard dash times are read from Sports-Reference HTML tables saved with an .xls extension (one file per year).
+
+2. Annual block minima of dash times are computed and analyzed on the negative-time scale (block maxima of -time).
+
+3. GEV and Gumbel models are optionally fit to empirical annual maxima as a diagnostic check.
+
+4. A Monte Carlo study evaluates the finite-sample behavior of GEV return-level estimation, including bias, RMSE, and empirical convergence rates.
+
+5. Return levels are transformed to the speed scale post-estimation, and Delta-method implications are examined.
+
+Packages
+```{r}
+suppressPackageStartupMessages({
+library(xml2)
+library(rvest)
+library(dplyr)
+library(purrr)
+library(extRemes)
+library(e1071)
+library(ggplot2)
+library(tidyr)
+library(readr)
+library(scales)
+})
+```
+Data input and helper functions
+```{r}
+folder_path <- "C:/Users/yapfr/Downloads/NFL Project"
+
+file_list <- list.files(
+  path       = folder_path,
+  pattern    = "^sportsref_download_\\d{4}\\.xls$",
+  full.names = TRUE
+)
+
+if (length(file_list) == 0) {
+  stop("No files found. Check folder_path and filename pattern.")
+}
+
+# Read Sports-Reference HTML disguised as .xls and return the first HTML table
+
+read_sportsref_xls_html <- function(fpath) {
+  doc  <- read_html(fpath)
+  tabs <- html_table(doc, fill = TRUE)
+  
+  if (length(tabs) == 0) stop("No tables found in file: ", fpath)
+  
+  tabs[[1]]
+}
+
+# Extract year from filename sportsref_download_YYYY.xls
+
+extract_year_from_filename <- function(fpath) {
+  as.numeric(gsub(".*_(\\d{4})\\.xls$", "\\1", basename(fpath)))
+}
+
+# Robust numeric conversion (handles "", "--", etc.)
+
+to_numeric_quiet <- function(x) suppressWarnings(as.numeric(x))
+```
+Load WR 40-yard dash times
+```{r}
+all_wr_times <- map_dfr(file_list, function(fpath) {
+yr <- extract_year_from_filename(fpath)
+df <- read_sportsref_xls_html(fpath)
+
+df %>%
+filter(.data$Pos == "WR") %>%
+mutate(time_40 = to_numeric_quiet(.data$`40yd`)) %>%
+filter(!is.na(.data$time_40)) %>%
+transmute(year = yr, time_40)
+})
+
+print(head(all_wr_times, 20))
+cat("\nTotal rows:", nrow(all_wr_times), "\n")
+summary(all_wr_times$time_40)
+```
+Parent distribution calibration
+```{r}
+mu_T  <- mean(all_wr_times$time_40, na.rm = TRUE)
+sd_T  <- sd(all_wr_times$time_40,   na.rm = TRUE)
+var_T <- var(all_wr_times$time_40,  na.rm = TRUE)
+
+counts <- as.numeric(table(all_wr_times$year))
+
+skew_T <- e1071::skewness(all_wr_times$time_40, na.rm = TRUE)
+k      <- 8 / (skew_T^2)
+
+cat("\nEmpirical parent moments (time scale):\n")
+print(c(mu_T = mu_T, sd_T = sd_T, var_T = var_T))
+
+cat("\nPer-year WR counts summary:\n")
+print(summary(counts))
+cat("Median:", median(counts), " SD:", sd(counts), " Var:", var(counts), "\n")
+
+cat("\nSkewness(time_40):", skew_T, "\n")
+cat("k = 8 / skew^2:", k, "\n")
+```
+Fixed calibration for reproducibility
+
+For the Monte Carlo study, the parent distribution is fixed to the calibration reported in the manuscript to ensure reproducibility.
+```{r}
+freeze_parent <- TRUE
+
+if (isTRUE(freeze_parent)) {
+mu_T       <- 4.5072520
+sd_T       <- 0.1017394
+n_per_year <- 44L
+} else {
+n_per_year <- as.integer(median(counts))
+}
+
+cat("\nParent parameters used in Monte Carlo:\n")
+print(c(mu_T = mu_T, sd_T = sd_T, n_per_year = n_per_year))
+```
+Empirical annual maxima
+
+Annual block minima of time correspond to block maxima of -time. We also track maxima on the speed scale.
+```{r}
+annual_maxima <- map_dfr(file_list, function(fpath) {
+yr <- extract_year_from_filename(fpath)
+df <- read_sportsref_xls_html(fpath)
+
+wr <- df %>%
+filter(.data$Pos == "WR") %>%
+mutate(time_40 = to_numeric_quiet(.data$`40yd`)) %>%
+filter(!is.na(.data$time_40))
+
+if (nrow(wr) == 0) {
+return(tibble(year = yr, max_neg_time = NA_real_, max_speed = NA_real_))
+}
+
+tibble(
+year         = yr,
+max_neg_time = max(-wr$time_40,      na.rm = TRUE),
+max_speed    = max(40 / wr$time_40,  na.rm = TRUE)
+)
+}) %>%
+arrange(year)
+
+print(head(annual_maxima, 20))
+```
+Optional GEV vs Gumbel diagnostic fits
+```{r}
+gev_neg <- fevd(x = annual_maxima$max_neg_time, type = "GEV",    method = "MLE")
+gum_neg <- fevd(x = annual_maxima$max_neg_time, type = "Gumbel", method = "MLE")
+
+gev_speed <- fevd(x = annual_maxima$max_speed, type = "GEV",    method = "MLE")
+gum_speed <- fevd(x = annual_maxima$max_speed, type = "Gumbel", method = "MLE")
+
+cat("\n--- Empirical fits: -time scale ---\n")
+print(summary(gev_neg))
+print(summary(gum_neg))
+
+cat("\n--- Empirical fits: speed scale ---\n")
+print(summary(gev_speed))
+print(summary(gum_speed))
+```
+Diagnostic plots
+```{r}
+par(mar = c(4, 4, 2, 1))
+plot(gev_neg)
+plot(gum_neg)
+plot(gev_speed)
+plot(gum_speed)
+```
+
+Likelihood-ratio tests (xi = 0 vs free xi)
+```{r}
+ll_gev_neg <- -gev_neg$results$value
+ll_gum_neg <- -gum_neg$results$value
+LRT_neg    <- 2 * (ll_gev_neg - ll_gum_neg)
+pval_neg   <- 1 - pchisq(LRT_neg, df = 1)
+
+ll_gev_speed <- -gev_speed$results$value
+ll_gum_speed <- -gum_speed$results$value
+LRT_speed    <- 2 * (ll_gev_speed - ll_gum_speed)
+pval_speed   <- 1 - pchisq(LRT_speed, df = 1)
+
+cat("\nLRT (xi=0 vs free):\n")
+print(c(LRT_neg = LRT_neg, pval_neg = pval_neg, LRT_speed = LRT_speed, pval_speed = pval_speed))
+```
+Monte Carlo simulation
+```{r}
+set.seed(20251122)
+
+years_grid <- c(5, 10, 15, 20, 25, 26, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75,
+80, 85, 90, 95, 100)
+
+n_sim   <- 1000
+periods <- years_grid
+```
+Simulation helper functions (parallel to the R script)
+```{r}
+simulate_block_maxima_normal <- function(n_years, n_per_year, mu_T, sd_T) {
+times <- rnorm(n_years * n_per_year, mean = mu_T, sd = sd_T)
+mat   <- matrix(times, nrow = n_years, ncol = n_per_year, byrow = TRUE)
+
+year_min_time <- apply(mat, 1, min)   # annual minima of time
+neg_time      <- -year_min_time       # annual maxima on -time scale
+
+list(neg_time = neg_time)
+}
+
+fit_gev_and_RL <- function(x, periods) {
+tryCatch({
+fit <- suppressWarnings(fevd(x, type = "GEV"))
+rl  <- suppressWarnings(return.level(fit, return.period = periods, do.ci = FALSE))
+
+pars <- fit$results$par
+list(
+  mu    = unname(pars["location"]),
+  sigma = unname(pars["scale"]),
+  xi    = unname(pars["shape"]),
+  RL    = as.numeric(rl)
+)
+
+}, error = function(e) {
+list(
+mu    = NA_real_,
+sigma = NA_real_,
+xi    = NA_real_,
+RL    = rep(NA_real_, length(periods))
+)
+})
+}
+
+simulate_once <- function(sim_id, n_years, n_per_year, mu_T, sd_T, periods) {
+sim <- simulate_block_maxima_normal(
+n_years    = n_years,
+n_per_year = n_per_year,
+mu_T       = mu_T,
+sd_T       = sd_T
+)
+
+fit_neg <- fit_gev_and_RL(sim$neg_time, periods = periods)
+
+# Transform RLs to speed AFTER estimation
+
+RL_speed <- 40 / (-fit_neg$RL)
+
+tibble(
+sim_id    = sim_id,
+years     = n_years,
+mu_hat    = fit_neg$mu,
+sigma_hat = fit_neg$sigma,
+xi_hat    = fit_neg$xi,
+RL_period = periods,
+RL_neg    = fit_neg$RL,
+RL_speed  = RL_speed
+)
+}
+```
+Monte Carlo execution
+```{r}
+results_long <- map_dfr(years_grid, function(n_years) {
+message("Simulating for n = ", n_years, " years ...")
+map_dfr(seq_len(n_sim), function(s) {
+simulate_once(
+sim_id     = s,
+n_years    = n_years,
+n_per_year = n_per_year,
+mu_T       = mu_T,
+sd_T       = sd_T,
+periods    = periods
+)
+})
+})
+
+dplyr::glimpse(results_long)
+
+nf_counts <- results_long %>%
+summarise(
+n_bad_RL_neg   = sum(!is.finite(RL_neg)),
+n_bad_RL_speed = sum(!is.finite(RL_speed)),
+n_bad_mu       = sum(!is.finite(mu_hat)),
+n_bad_sigma    = sum(!is.finite(sigma_hat)),
+n_bad_xi       = sum(!is.finite(xi_hat))
+)
+
+cat("\nNon-finite counts:\n")
+print(nf_counts)
+```
+Boxplot diagnostics (zoomed)
+```{r}
+plot_RL_box_zoom <- function(df_long,
+RLp,
+which_scale = c("neg", "speed"),
+zoom_prob = 0.99,
+x_breaks = c(5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)) {
+which_scale <- match.arg(which_scale)
+
+dfp <- df_long %>%
+filter(RL_period == RLp) %>%
+mutate(RL_value = if (which_scale == "neg") RL_neg else RL_speed) %>%
+filter(is.finite(RL_value))
+
+if (nrow(dfp) == 0) stop("No finite values for RL", RLp, " on scale ", which_scale)
+
+y_lo <- quantile(dfp$RL_value, 1 - zoom_prob, na.rm = TRUE)
+y_hi <- quantile(dfp$RL_value, zoom_prob,     na.rm = TRUE)
+
+scale_label <- if (which_scale == "neg") "-time" else "speed"
+
+ggplot(dfp, aes(x = factor(years), y = RL_value)) +
+geom_boxplot(
+width         = 0.6,
+linewidth     = 0.4,
+outlier.alpha = 0.10,
+outlier.size  = 0.5
+) +
+coord_cartesian(ylim = c(y_lo, y_hi)) +
+scale_x_discrete(breaks = as.character(x_breaks)) +
+scale_y_continuous(labels = scales::label_number(accuracy = 0.005)) +
+labs(
+title = paste0("Convergence of RL", RLp, " (", scale_label, " scale)"),
+x     = "Record length (years)",
+y     = paste0("Estimated return level (", scale_label, ")")
+) +
+theme_minimal(base_size = 14) +
+theme(
+panel.grid.minor   = element_blank(),
+panel.grid.major.x = element_blank(),
+axis.text.x        = element_text(size = 11),
+axis.text.y        = element_text(size = 11),
+axis.title         = element_text(size = 12),
+plot.title         = element_text(face = "bold", size = 15),
+plot.margin        = margin(10, 12, 10, 12)
+)
+}
+
+plot_RL_box_zoom(results_long, RLp = 25, which_scale = "neg")
+plot_RL_box_zoom(results_long, RLp = 25, which_scale = "speed")
+```
+
+
+“Truth” via long-run simulation
+```{r}
+years_true <- 100000
+
+sim_true <- simulate_block_maxima_normal(
+n_years    = years_true,
+n_per_year = n_per_year,
+mu_T       = mu_T,
+sd_T       = sd_T
+)
+
+fit_true <- fit_gev_and_RL(sim_true$neg_time, periods = periods)
+
+true_pars_neg <- c(mu = fit_true$mu, sigma = fit_true$sigma, xi = fit_true$xi)
+true_RL_neg   <- fit_true$RL
+true_RL_speed <- 40 / (-true_RL_neg)
+
+cat("\nApproximate 'truth' parameters on -time scale (long-run fit):\n")
+print(true_pars_neg)
+
+truth_tbl <- tibble(
+RL_period  = periods,
+true_neg   = true_RL_neg,
+true_speed = true_RL_speed
+)
+
+print(truth_tbl)
+```
+Bias/RMSE summaries
+```{r}
+bias_rmse_all <- results_long %>%
+left_join(truth_tbl, by = "RL_period") %>%
+mutate(
+err_neg   = RL_neg   - true_neg,
+err_speed = RL_speed - true_speed
+) %>%
+group_by(RL_period, years) %>%
+summarise(
+bias_neg   = mean(err_neg,   na.rm = TRUE),
+rmse_neg   = sqrt(mean(err_neg^2,   na.rm = TRUE)),
+sd_neg     = sd(RL_neg,      na.rm = TRUE),
+bias_speed = mean(err_speed, na.rm = TRUE),
+rmse_speed = sqrt(mean(err_speed^2, na.rm = TRUE)),
+sd_speed   = sd(RL_speed,    na.rm = TRUE),
+.groups    = "drop"
+)
+
+print(head(bias_rmse_all, 30))
+```
+Bias and RMSE plots
+```{r}
+plot_rmse_clean <- function(df_bias_rmse, RLp, which_scale = c("neg", "speed"),
+n_min_rate = 25,
+x_breaks = c(5, 10, 20, 30, 40, 50, 75, 100),
+r2_min = 0.50) {
+which_scale <- match.arg(which_scale)
+dfp <- df_bias_rmse %>% dplyr::filter(RL_period == RLp)
+
+rmse_col    <- if (which_scale == "neg") "rmse_neg" else "rmse_speed"
+scale_label <- if (which_scale == "neg") "-time" else "speed"
+
+dfp <- dfp %>% dplyr::mutate(rmse_plot = .data[[rmse_col]])
+
+df_rate <- dfp %>%
+dplyr::filter(years >= n_min_rate, is.finite(rmse_plot), rmse_plot > 0)
+
+fit   <- lm(log(rmse_plot) ~ log(years), data = df_rate)
+alpha <- -coef(fit)[["log(years)"]]
+C     <- exp(coef(fit)[["(Intercept)"]])
+r2    <- summary(fit)$r.squared
+
+fit_label <- if (is.finite(alpha) && alpha > 0 && is.finite(r2) && r2 >= r2_min) {
+paste0(
+"Asymptotic fit (years >= ", n_min_rate, "): RMSE ≈ ",
+sprintf("%.3g", C), " * n^{-", sprintf("%.2f", alpha), "}"
+)
+} else {
+paste0(
+"No clear power-law decay (years >= ", n_min_rate, "): ",
+"alpha = ", sprintf("%.2f", alpha), ", R^2 = ", sprintf("%.2f", r2)
+)
+}
+
+ggplot(dfp, aes(x = years, y = rmse_plot)) +
+geom_line(linewidth = 0.6, alpha = 0.8) +
+geom_point(size = 2, alpha = 0.8) +
+scale_y_log10(
+labels = scales::label_number(accuracy = 0.001),
+breaks = scales::log_breaks(n = 6)
+) +
+scale_x_continuous(breaks = x_breaks) +
+labs(
+title = paste0("RMSE vs Record Length for RL", RLp, " (", scale_label, ")\n", fit_label),
+x = "Record length (years)",
+y = "RMSE (log scale)"
+) +
+theme_minimal(base_size = 14) +
+theme(
+panel.grid.minor = element_blank(),
+plot.title = element_text(face = "bold")
+)
+}
+
+plot_bias_clean <- function(df_bias_rmse, RLp, which_scale = c("neg", "speed"),
+x_breaks = c(5, 10, 20, 30, 40, 50, 75, 100)) {
+which_scale <- match.arg(which_scale)
+dfp <- df_bias_rmse %>% dplyr::filter(RL_period == RLp)
+
+bias_col    <- if (which_scale == "neg") "bias_neg" else "bias_speed"
+scale_label <- if (which_scale == "neg") "-time" else "speed"
+
+dfp <- dfp %>% dplyr::mutate(bias_plot = .data[[bias_col]])
+
+ggplot(dfp, aes(x = years, y = bias_plot)) +
+geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+geom_line(linewidth = 0.6, alpha = 0.8) +
+geom_point(size = 2, alpha = 0.8) +
+scale_x_continuous(breaks = x_breaks) +
+scale_y_continuous(labels = scales::label_number(accuracy = 0.01)) +
+labs(
+title = paste0("Bias vs Record Length for RL", RLp, " (", scale_label, ")"),
+x = "Record length (years)",
+y = "Bias"
+) +
+theme_minimal(base_size = 14) +
+theme(
+panel.grid.minor = element_blank(),
+plot.title = element_text(face = "bold")
+)
+}
+
+plot_rmse_clean(bias_rmse_all, RLp = 25, which_scale = "neg")
+plot_rmse_clean(bias_rmse_all, RLp = 25, which_scale = "speed")
+plot_bias_clean(bias_rmse_all, RLp = 25, which_scale = "neg")
+plot_bias_clean(bias_rmse_all, RLp = 25, which_scale = "speed")
+```
+
+Convergence-rate and Delta-method table
+```{r}
+estimate_rate_and_constant <- function(df_bias_rmse,
+which_scale = c("neg", "speed"),
+n_min_rate = 25,
+min_points = 4) {
+which_scale <- match.arg(which_scale)
+rmse_col <- if (which_scale == "neg") "rmse_neg" else "rmse_speed"
+
+df2 <- df_bias_rmse %>%
+mutate(rmse_tmp = .data[[rmse_col]]) %>%
+filter(years >= n_min_rate, is.finite(rmse_tmp), rmse_tmp > 0)
+
+df2 %>%
+group_by(RL_period) %>%
+group_modify(~{
+dat <- .x
+if (nrow(dat) < min_points) {
+return(tibble(alpha = NA_real_, C = NA_real_, r2 = NA_real_, n_used = nrow(dat)))
+}
+fit <- lm(log(rmse_tmp) ~ log(years), data = dat)
+tibble(
+alpha  = -coef(fit)[["log(years)"]],
+C      = exp(coef(fit)[["(Intercept)"]]),
+r2     = summary(fit)$r.squared,
+n_used = nrow(dat)
+)
+}) %>%
+ungroup()
+}
+
+rate_neg   <- estimate_rate_and_constant(bias_rmse_all, which_scale = "neg",   n_min_rate = 25)
+rate_speed <- estimate_rate_and_constant(bias_rmse_all, which_scale = "speed", n_min_rate = 25)
+
+rate_summary <- rate_neg %>%
+rename(alpha_neg = alpha, C_neg = C, r2_neg = r2, n_used_neg = n_used) %>%
+left_join(
+rate_speed %>%
+rename(alpha_speed = alpha, C_speed = C, r2_speed = r2, n_used_speed = n_used),
+by = "RL_period"
+) %>%
+mutate(
+C_ratio     = C_speed / C_neg,
+RL_neg_true = true_RL_neg[match(RL_period, periods)],
+infl_theory = 40 / (RL_neg_true^2),
+
+ratio_over_theory     = C_ratio / infl_theory,
+alpha_theory          = 0.5,
+alpha_neg_diff        = alpha_neg - alpha_theory,
+alpha_speed_diff      = alpha_speed - alpha_theory,
+alpha_neg_ratio       = alpha_neg / alpha_theory,
+alpha_speed_ratio     = alpha_speed / alpha_theory,
+alpha_speed_minus_neg = alpha_speed - alpha_neg,
+alpha_speed_over_neg  = alpha_speed / alpha_neg
+
+) %>%
+arrange(RL_period)
+
+print(rate_summary, n = nrow(rate_summary))
+```
+Write LaTeX table rows (robust in Knit AND interactive R)
+```{r}
+is_knitting <- isTRUE(getOption("knitr.in.progress"))
+
+# Decide output directory
+out_dir <- if (is_knitting) {
+  # When knitting: write next to the Rmd so LaTeX \input finds it reliably
+  tryCatch(
+    normalizePath(dirname(knitr::current_input()), winslash = "/", mustWork = FALSE),
+    error = function(e) normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+  )
+} else {
+  # When running interactively: write to your project/data folder
+  normalizePath(folder_path, winslash = "/", mustWork = FALSE)
+}
+
+# Fallback if folder_path doesn't exist (avoid accidental OneDrive surprises)
+if (!dir.exists(out_dir)) {
+  warning("Output directory does not exist: ", out_dir,
+          "\nFalling back to current working directory: ", getwd())
+  out_dir <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+}
+
+out_tex <- file.path(out_dir, "rate_summary_rows_with_bottomrule.tex")
+
+# Build the table
+rate_tbl <- rate_summary %>%
+  dplyr::transmute(
+    p        = RL_period,
+    alpha_mT = alpha_neg,
+    C_mT     = C_neg,
+    R2_mT    = r2_neg,
+    alpha_V  = alpha_speed,
+    C_V      = C_speed,
+    R2_V     = r2_speed,
+    ratio_C  = C_ratio,
+    infl_th  = infl_theory
+  ) %>%
+  dplyr::arrange(p)
+
+fmt <- function(x, d = 3) ifelse(is.na(x), "", formatC(x, format = "f", digits = d))
+
+rate_tbl_fmt <- rate_tbl %>%
+  dplyr::mutate(
+    alpha_mT = fmt(alpha_mT, 3),
+    C_mT     = fmt(C_mT, 3),
+    R2_mT    = fmt(R2_mT, 3),
+    alpha_V  = fmt(alpha_V, 3),
+    C_V      = fmt(C_V, 3),
+    R2_V     = fmt(R2_V, 3),
+    ratio_C  = fmt(ratio_C, 3),
+    infl_th  = fmt(infl_th, 3)
+  )
+
+lines <- apply(rate_tbl_fmt, 1, function(r) {
+  paste0(
+    r[["p"]], " & ",
+    r[["alpha_mT"]], " & ", r[["C_mT"]], " & ", r[["R2_mT"]], " & ",
+    r[["alpha_V"]],  " & ", r[["C_V"]],  " & ", r[["R2_V"]],  " & ",
+    r[["ratio_C"]],  " & ", r[["infl_th"]], " \\\\"
+  )
+})
+
+# Put \bottomrule INSIDE the file (since LaTeX tabular expects it there if you omit it outside)
+lines <- c(lines, "\\bottomrule")
+
+# Binary write (prevents BOM/encoding/control-char issues that can break booktabs)
+con <- file(out_tex, open = "wb")
+writeBin(charToRaw(paste(lines, collapse = "\n")), con)
+close(con)
+
+message("Wrote: ", normalizePath(out_tex, winslash = "/", mustWork = FALSE))
+```
+Reproducibility information
+```{r}
+sessionInfo()
+```
