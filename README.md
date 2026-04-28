@@ -58,17 +58,25 @@ Monte Carlo simulations are used to generate annual block minima, fit GEV models
 - Return-level estimation on negative-time and speed scales  
 - Bias and RMSE summaries  
 - Convergence diagnostics across record lengths  
-- Reproducible HTML report with figures and diagnostics  
+- Reproducible reports with figures and diagnostics  
 
 ---
 
 ## How to View Results
 
-The full analysis and results are available in:
+The full analysis and results are available in the following formats:
 
-- `results/nfl_wr_gev_simulation.html`
+- 📄 **Recommended (quickest):**  
+  [Simulation-Based Verification (PDF)](appendix/Simulation-Based Verification.pdf)  
+  → Opens directly in your browser
 
-Download and open this file in a web browser to view plots, diagnostics, and simulation outputs.
+- 🌐 **HTML report (full output):**  
+  `results/nfl_wr_gev_simulation.html`  
+  → GitHub displays this file as raw code  
+  → Download and open locally in a web browser for the full rendered report
+
+- 🧪 **Reproducible source code:**  
+  `analysis/nfl_wr_gev_simulation.Rmd`
 
 ---
 
