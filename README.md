@@ -67,16 +67,16 @@ Monte Carlo simulations are used to generate annual block minima, fit GEV models
 The full analysis and results are available in the following formats:
 
 - 📄 **Recommended (quickest):**  
-  [Simulation-Based Verification (PDF)](appendix/Simulation-Based Verification.pdf)  
+  👉 [Simulation-Based Verification (PDF)](appendix/Simulation-Based%20Verification.pdf)  
   → Opens directly in your browser
 
 - 🌐 **HTML report (full output):**  
-  `results/nfl_wr_gev_simulation.html`  
-  → GitHub displays this file as raw code  
-  → Download and open locally in a web browser for the full rendered report
+  👉 [Download HTML report](results/nfl_wr_gev_simulation.html)  
+  → GitHub displays this file as raw HTML code (not rendered)  
+  → Download and open locally in a web browser for the full report
 
 - 🧪 **Reproducible source code:**  
-  `analysis/nfl_wr_gev_simulation.Rmd`
+  👉 [View R Markdown source](analysis/nfl_wr_gev_simulation.Rmd)
 
 ---
 
